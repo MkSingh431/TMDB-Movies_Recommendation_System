@@ -66,14 +66,32 @@ def load_similarity(movies):
     # 1) model/similarity.pkl
     sim_path = os.path.join(MODEL_DIR, "similarity.pkl")
     if os.path.exists(sim_path):
-        with open(sim_path, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(sim_path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
 
     # 2) similarity.pkl (root)
     sim_path = os.path.join(BASE_DIR, "similarity.pkl")
     if os.path.exists(sim_path):
-        with open(sim_path, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(sim_path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            # If this is a Git LFS pointer, ignore and fallback
+            try:
+                with open(sim_path, "rb") as f:
+                    head = f.read(200)
+                if b"git-lfs.github.com/spec" in head:
+                    st.warning(
+                        "Found a Git LFS pointer for `similarity.pkl` in deploy. "
+                        "Either enable Git LFS in the repo or remove this file and "
+                        "let the app build similarity from tags."
+                    )
+            except Exception:
+                pass
+            pass
 
     # 3) Build from tags if available
     if "tags" in movies.columns:
