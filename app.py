@@ -1,129 +1,159 @@
-import streamlit as st
+import os
 import pickle
+import traceback
+
+import numpy as np
 import pandas as pd
 import requests
-import os
-import numpy as np
+import streamlit as st
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# --- Function to Fetch Posters ---
+
+BASE_DIR = os.path.dirname(__file__)
+MODEL_DIR = os.path.join(BASE_DIR, "model")
+
+
 def fetch_poster(movie_id):
-    url = "https://api.themoviedb.org/3/movie/{}?api_key=0737e3e83144018bce73b00411bc39bd&language=en-US".format(movie_id)
+    if not movie_id:
+        return "https://via.placeholder.com/500x750?text=No+Image"
+    url = (
+        "https://api.themoviedb.org/3/movie/{}?api_key=0737e3e83144018bce73b00411bc39bd&language=en-US"
+    ).format(movie_id)
     try:
         resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         data = resp.json()
-        poster_path = data.get('poster_path')
+        poster_path = data.get("poster_path")
         if not poster_path:
             return "https://via.placeholder.com/500x750?text=No+Image"
         return "https://image.tmdb.org/t/p/w500/" + poster_path
     except Exception:
-        return "https://via.placeholder.com/500x750?text=Error"
+        return "https://via.placeholder.com/500x750?text=No+Image"
 
-# --- Recommendation Logic ---
-def recommend(movie):
-    try:
-        movie_index = movies[movies['title'] == movie].index[0]
-        distances = similarity[movie_index]
-        movies_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:6]
 
-        recommended_movies = []
-        recommended_posters = []
+@st.cache_data
+def load_movies():
+    # 1) model/movie_list.pkl
+    movie_list_path = os.path.join(MODEL_DIR, "movie_list.pkl")
+    if os.path.exists(movie_list_path):
+        try:
+            with open(movie_list_path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
 
-        for i in movies_list:
-            movie_row = movies.iloc[i[0]]
-            recommended_movies.append(movie_row.title)
-            
-            # Handle ID columns safely
-            if 'movie_id' in movies.columns:
-                recommended_posters.append(fetch_poster(movie_row.movie_id))
-            elif 'id' in movies.columns:
-                recommended_posters.append(fetch_poster(movie_row.id))
-            else:
-                recommended_posters.append("https://via.placeholder.com/500x750?text=No+ID")
+    # 2) movies_dict.pkl (root)
+    movies_dict_path = os.path.join(BASE_DIR, "movies_dict.pkl")
+    if os.path.exists(movies_dict_path):
+        with open(movies_dict_path, "rb") as f:
+            data = pickle.load(f)
+        return pd.DataFrame(data)
 
-        return recommended_movies, recommended_posters
-    except Exception as e:
-        st.error(f"Error generating recommendation: {e}")
+    # 3) CSV fallback
+    csv_path = os.path.join(BASE_DIR, "tmdb_5000_movies.csv")
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        if "title" not in df.columns and "original_title" in df.columns:
+            df = df.rename(columns={"original_title": "title"})
+        return df
+
+    return None
+
+
+@st.cache_resource
+def load_similarity(movies):
+    # 1) model/similarity.pkl
+    sim_path = os.path.join(MODEL_DIR, "similarity.pkl")
+    if os.path.exists(sim_path):
+        with open(sim_path, "rb") as f:
+            return pickle.load(f)
+
+    # 2) similarity.pkl (root)
+    sim_path = os.path.join(BASE_DIR, "similarity.pkl")
+    if os.path.exists(sim_path):
+        with open(sim_path, "rb") as f:
+            return pickle.load(f)
+
+    # 3) Build from tags if available
+    if "tags" in movies.columns:
+        cv = CountVectorizer(max_features=5000, stop_words="english")
+        vectors = cv.fit_transform(movies["tags"]).toarray()
+        return cosine_similarity(vectors)
+
+    # 4) Fallback identity
+    return np.eye(len(movies))
+
+
+def recommend(movie, movies, similarity):
+    if movies is None or similarity is None:
         return [], []
 
-# --- Main App Execution ---
-st.title('🎬 Movie Recommender System')
+    idxs = movies[movies["title"] == movie].index
+    if len(idxs) == 0:
+        st.error(f'Movie "{movie}" not found in dataset.')
+        return [], []
 
-# Define file paths
-pkl_file = 'model/movie_list.pkl'
-sim_file = 'model/similarity.pkl'
-csv_file = 'tmdb_5000_movies.csv'
+    index = idxs[0]
+    distances = sorted(list(enumerate(similarity[index])), reverse=True, key=lambda x: x[1])
 
-movies = None
-similarity = None
+    recommended_movie_names = []
+    recommended_movie_posters = []
+    for i in distances[1:6]:
+        row = movies.iloc[i[0]]
+        if "movie_id" in movies.columns:
+            movie_id = row.movie_id
+        elif "id" in movies.columns:
+            movie_id = row.id
+        else:
+            movie_id = None
+        recommended_movie_posters.append(fetch_poster(movie_id))
+        recommended_movie_names.append(row.title)
 
-# --- 1. Try Loading Pre-built Pickle Files (Safely) ---
-# We wrap this in a TRY block so if the file is "fake" (LFS pointer), it fails gracefully.
-if os.path.exists(pkl_file) and os.path.exists(sim_file):
-    try:
-        with open(pkl_file, 'rb') as f:
-            movies = pickle.load(f)
-        with open(sim_file, 'rb') as f:
-            similarity = pickle.load(f)
-        # Check if loaded data is valid (not None)
-        if movies is None or similarity is None:
-            raise ValueError("Loaded pickle data is empty")
-            
-    except (pickle.UnpicklingError, EOFError, ValueError, Exception) as e:
-        # This catches the "\x0a" error!
-        st.warning(f"Pickle files found but corrupted (likely Git LFS pointers). Switching to CSV fallback mode...")
-        movies = None
-        similarity = None
+    return recommended_movie_names, recommended_movie_posters
 
-# --- 2. Fallback: Build Model from CSV ---
-if movies is None or similarity is None:
-    if os.path.exists(csv_file):
-        with st.spinner('Building model from CSV... This may take a moment.'):
-            try:
-                # Load Data
-                df = pd.read_csv(csv_file)
-                
-                # Preprocessing
-                df['overview'] = df['overview'].fillna('')
-                # Ensure title column exists
-                if 'original_title' in df.columns and 'title' not in df.columns:
-                    df['title'] = df['original_title']
-                
-                # Create tags for similarity
-                df['tags'] = df['overview'] 
-                
-                # Vectorize (Convert text to numbers)
-                cv = CountVectorizer(max_features=5000, stop_words='english')
-                vectors = cv.fit_transform(df['tags'].values.astype('U'))
-                
-                # Calculate Cosine Similarity
-                similarity = cosine_similarity(vectors)
-                movies = df
-                
-                st.success("Model built successfully from CSV!")
-            except Exception as e:
-                st.error(f"Critical Error building model from CSV: {e}")
-                st.stop()
-    else:
-        st.error("❌ File Not Found: Please upload 'tmdb_5000_movies.csv' to your GitHub repository.")
+
+try:
+    st.header("Movie Recommender System")
+
+    movies = load_movies()
+    if movies is None:
+        st.error(
+            "Model files not found. Add `model/movie_list.pkl` or `movies_dict.pkl`, "
+            "or add `tmdb_5000_movies.csv` to the project."
+        )
         st.stop()
 
-# --- UI Layout ---
-if movies is not None:
-    selected_movie_name = st.selectbox(
-        'Type or select a movie from the dropdown',
-        movies['title'].values
+    similarity = load_similarity(movies)
+
+    movie_list = movies["title"].values
+    selected_movie = st.selectbox(
+        "Type or select a movie from the dropdown",
+        movie_list,
     )
 
-    if st.button('Recommend'):
-        names, posters = recommend(selected_movie_name)
-        
-        if names:
-            col1, col2, col3, col4, col5 = st.columns(5)
-            cols = [col1, col2, col3, col4, col5]
-            for idx, col in enumerate(cols):
-                with col:
-                    st.text(names[idx])
-                    st.image(posters[idx])
+    if st.button("Show Recommendation"):
+        recommended_movie_names, recommended_movie_posters = recommend(
+            selected_movie, movies, similarity
+        )
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.text(recommended_movie_names[0])
+            st.image(recommended_movie_posters[0])
+        with col2:
+            st.text(recommended_movie_names[1])
+            st.image(recommended_movie_posters[1])
+        with col3:
+            st.text(recommended_movie_names[2])
+            st.image(recommended_movie_posters[2])
+        with col4:
+            st.text(recommended_movie_names[3])
+            st.image(recommended_movie_posters[3])
+        with col5:
+            st.text(recommended_movie_names[4])
+            st.image(recommended_movie_posters[4])
+except Exception:
+    tb = traceback.format_exc()
+    print(tb)
+    st.error("Error running the app — full traceback shown below:")
+    st.text(tb)
