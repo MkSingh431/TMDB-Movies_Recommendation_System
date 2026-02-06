@@ -6,10 +6,7 @@ import pandas as pd
 import numpy as np
 import traceback
 
-# Define paths
-pkl_path = 'model/movie_list.pkl'
-sim_path = 'model/similarity.pkl'
-csv_path = 'tmdb_5000_movies.csv'
+
 def fetch_poster(movie_id):
     url = "https://api.themoviedb.org/3/movie/{}?api_key=0737e3e83144018bce73b00411bc39bd&language=en-US".format(movie_id)
     try:
@@ -147,5 +144,6 @@ except Exception:
     # Show the full traceback on the Streamlit page to help debugging on deploy
     st.error('Error running the app — full traceback shown below:')
     st.text(tb)
+
 
 
